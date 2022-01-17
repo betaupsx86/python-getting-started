@@ -3,12 +3,16 @@
   "description": "A barebones Python app, which can easily be deployed to Heroku.",
   "image": "heroku/python",
   "repository": "https://github.com/heroku/python-getting-started",
-  "keywords": ["python", "django" ],
+  "keywords": ["python", "django", "stripe" ],
   "addons": [ "heroku-postgresql" ],
   "env": {
     "SECRET_KEY": {
       "description": "The secret key for the Django application.",
       "generator": "secret"
+    },
+    "STRIPE_TEST_SECRET_KEY": {
+      "description": "Find this at https://dashboard.stripe.com/account/apikeys (it'll look like sk_test_****)",
+      "required": true
     }
   },
   "environments": {

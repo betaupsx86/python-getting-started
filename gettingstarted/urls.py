@@ -18,4 +18,10 @@ urlpatterns = [
     path("", hello.views.index, name="index"),
     path("db/", hello.views.db, name="db"),
     path("admin/", admin.site.urls),
+    path("get_quote", hello.views.get_quote, name="get_quote"),
+    path("create_payment_intent", hello.views.create_payment_intent, name="create_payment_intent"),
+    path("ephemeral_keys", hello.views.ephemeral_keys, name="ephemeral_keys"),    
+    # path("admin/", admin.site.urls),
+    # path("admin/", admin.site.urls),
+
 ]
