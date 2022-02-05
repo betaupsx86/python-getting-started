@@ -1,3 +1,5 @@
+from decimal import Decimal
+from locale import currency
 from django.shortcuts import render
 from django.http import HttpResponse
 from django.http.response import JsonResponse
@@ -7,7 +9,7 @@ from rest_framework.parsers import JSONParser
 from rest_framework import status
 from rest_framework.decorators import api_view
 
-from .models import Greeting, PaymentIntent
+from .models import Greeting, PaymentIntent, ProdigiOrder
 from .serializers import PaymentIntentSerializer
 import json
 import stripe
@@ -18,9 +20,12 @@ import os
 from functools import reduce
    
 import logging
+
+from django.core import serializers
 logger = logging.getLogger(__name__)
 
 prodigi_api_key = 'test_97a1e474-0b3e-4ee9-9fb7-3557ff768607'
+SERVICE_CHARGE = Decimal(1.05)
 
 def authenticate(request):
   # This code simulates "loading the Stripe customer for your current session".
@@ -102,12 +107,6 @@ def ephemeral_keys(request):
     stripe.api_key = os.environ.get('STRIPE_TEST_SECRET_KEY')
     customer = authenticate(request)
     try:
-        # ephemeral_keys_request = JSONParser().parse(request)
-        # logger.error(ephemeral_keys_request)
-        # key = stripe.EphemeralKey.create(
-        #     {"customer": customer.id},
-        #     {"stripe_version": ephemeral_keys_request["api_version"]}
-        #     )
         key = stripe.EphemeralKey.create(
             customer = customer.id,
             stripe_version = request.POST.get("api_version")
@@ -118,55 +117,81 @@ def ephemeral_keys(request):
         # return log_info("Error creating ephemeral key: #{e.message}")
         raise e
 
-def prodigi_quote(quote_request):
+def prodigi_quote(shippingMethod = "Budget", destinationCountryCode = "US", currencyCode="USD", items = list()):
+    stripe.api_key = os.environ.get('STRIPE_TEST_SECRET_KEY')
+
     url = 'https://api.sandbox.prodigi.com/v4.0/quotes'
     headers = {
         'X-API-Key' : prodigi_api_key,
         'Content-type': 'application/json',
-        # 'Accept': 'text/plain'
         }
     payload = {
-        "shippingMethod": quote_request.get("shippingMethod"),
-        "destinationCountryCode": quote_request.get("shippingDestination"),
-        "currencyCode":quote_request.get("currency"),
-        "items": [
-            {
-                "sku": product.get("sku"),
-                "copies": product.get("copies"),
-                "attributes": product.get("metadata"),
-                "assets" : [
-                    { "printArea" : "default" }
-                ]
-            }           
-            for product in quote_request.get("products")
-        ]
+        "shippingMethod": shippingMethod,
+        "destinationCountryCode": destinationCountryCode,
+        "currencyCode":currencyCode,
+        "items": items,
     }
-    logger.warning(payload)
 
-    response = requests.post(url,data=json.dumps(payload),headers=headers)
-    quote = response.json()
-    logger.warning(quote)
-    logger.warning(response)
-    return quote
-    # quote = JSONParser().parse(response)
-    # logger.warning(quote)
-    # return quote
+    quote_response = requests.post(url,headers=headers,data=json.dumps(payload))
+    return quote_response
 
 
 @api_view(['POST'])
 def get_quote(request):
     stripe.api_key = os.environ.get('STRIPE_TEST_SECRET_KEY')
     customer = authenticate(request)
-    quote_request = JSONParser().parse(request)
-
     try:
-        quote = prodigi_quote(quote_request)
-        return JsonResponse(quote, safe=False)
-        # return quote
+        url = 'https://api.sandbox.prodigi.com/v4.0/quotes'
+        headers = {
+            'X-API-Key' : prodigi_api_key,
+            'Content-type': 'application/json',
+            }
+        payload = request.data
+        response = requests.post(url,data=json.dumps(payload),headers=headers)
+        return JsonResponse(response.json(), safe=False)
     except stripe.error.StripeError as e:
         raise e
 
-def do_prodigi_request(payment_intent_request):
+@api_view(['POST'])
+def get_quotes(request):
+    stripe.api_key = os.environ.get('STRIPE_TEST_SECRET_KEY')
+    customer = authenticate(request)
+    try:
+        url = 'https://api.sandbox.prodigi.com/v4.0/quotes'
+        headers = {
+            'X-API-Key' : prodigi_api_key,
+            'Content-type': 'application/json',
+            }
+        quotes = list()
+        for quote in request.data:
+            quote_response = requests.post(url,data=json.dumps(quote),headers=headers)
+            quotes.append(quote_response.json())
+
+        return JsonResponse(quotes, safe=False)
+    except stripe.error.StripeError as e:
+        raise e
+
+def prodigi_order(merchantReference=None, callbackUrl=None, idempotencyKey=None, shippingMethod = "Budget", recipient = dict, items = list()):
+    stripe.api_key = os.environ.get('STRIPE_TEST_SECRET_KEY')
+
+    url = 'https://api.sandbox.prodigi.com/v4.0/Orders'
+    headers = {
+        'X-API-Key' : prodigi_api_key,
+        'Content-type': 'application/json',
+        }
+    payload = {
+        "merchantReference": merchantReference,
+        "callbackUrl": callbackUrl,
+        "idempotencyKey": idempotencyKey,
+        "shippingMethod": shippingMethod,
+        "recipient": recipient,
+        "items": items,
+    }
+
+    order_response = requests.post(url,headers=headers,data=json.dumps(payload))
+    return order_response
+
+def create_trial_prodigi_order():
     url = 'https://api.sandbox.prodigi.com/v4.0/Orders'
 
     headers = {
@@ -203,8 +228,7 @@ def do_prodigi_request(payment_intent_request):
         ]
     }
     response = requests.post(url,data=json.dumps(payload),headers=headers)
-    order = JSONParser().parse(request)
-    logger.warning(order)
+    return response
 
 @api_view(['POST'])
 def create_payment_intent(request):
@@ -221,26 +245,79 @@ def create_payment_intent(request):
 
     # Calculate how much to charge the customer
     logger.error(payment_intent_request.keys())
-    amount = calculate_price(payment_intent_request["products"], payment_intent_request["shippingMethod"])
-    do_prodigi_request(payment_intent_request)
+    # amount = calculate_price(payment_intent_request["products"], payment_intent_request["shippingMethod"])
+    # do_prodigi_request(payment_intent_request)
+    def get_prodigi_quote(payment_intent_request):
+        prodigi_items = list()
+        sku_to_id = dict()
+        stripe_subtotal = Decimal(0.0)
+        for product in payment_intent_request["products"]:
+            # We can use the stripe record of the product to crossreference and check prices
+            stripe_product = stripe.Product.retrieve(product["id"])
+            stripe_unit_price = price_lookup(product["id"])
+            stripe_subtotal += Decimal(stripe_unit_price * product["quantity"])
+            sku_to_id[stripe_product["metadata"]["sku"]] = stripe_product["id"]
+            prodigi_attributes = dict(filter(lambda x: x[0] != "scale", product["attributes"].items()))
+            prodigi_items.append({
+                "sku":stripe_product["metadata"]["sku"],
+                "copies": product["quantity"],
+                "attributes": prodigi_attributes,
+                "assets": [{"printArea": "default"}]               
+            })        
 
+        country_currency = currency_for_country(payment_intent_request["country"])
+        quote_response = prodigi_quote(
+            shippingMethod = payment_intent_request.get("shipmentMethod"),
+            destinationCountryCode = payment_intent_request["shippingInformation"]["address"]["country"],
+            currencyCode = country_currency,
+            items = prodigi_items
+        )
+
+        quotes = quote_response.json()
+        # Verify that everything is correct with the quote ie: Is not less than what we are charging the customer
+        assert(quotes["outcome"] == "Created")
+        quote = quotes["quotes"][0]
+        assert(quote["costSummary"]["items"]["currency"].lower() == country_currency)
+        items_cost = Decimal(quote["costSummary"]["items"]["amount"]) * 100
+        assert(quote["costSummary"]["shipping"]["currency"].lower() == country_currency)
+        shipping_cost = Decimal(quote["costSummary"]["shipping"]["amount"]) * 100
+
+        if items_cost > stripe_subtotal:
+            for item in quote["items"]:
+                product_id = sku_to_id.get(item["sku"], None)
+                unit_amount = int(Decimal(item["unitCost"]["amount"]) * 100)      
+                currency = item["unitCost"]["currency"].lower()
+                if product_id:         
+                    update_price(product_id, unit_amount, currency, True)
+                    sku_to_id.pop(item["sku"])                    
+
+        # We can return and adjust item prices here depending on demand etc
+        total_cost = (shipping_cost + items_cost)
+        return prodigi_items, total_cost
+
+    prodigi_items, prodigi_quote_total = get_prodigi_quote(payment_intent_request)     
     try:
         payment_intent = stripe.PaymentIntent.create(
-        amount=amount,
-        currency=currency_for_country(payment_intent_request["country"]),
-        customer=payment_intent_request.get("customer_id", customer.id),
+        amount= int(prodigi_quote_total * SERVICE_CHARGE),
+        currency=currency_for_country(payment_intent_request["country"].lower()),
+        customer=payment_intent_request.get("customerId", customer.id),
         description="Example PaymentIntent",
         capture_method="manual" if os.environ.get('CAPTURE_METHOD') == "manual" else "automatic",
         payment_method_types= supported_payment_methods if supported_payment_methods else payment_methods_for_country(payment_intent_request["country"]),
-        metadata={"order_id" : '5278735C-1F40-407D-933A-286E463E72D8'}.update(payment_intent_request.get("metadata",{})),
+        metadata={
+            "shippingMethod": payment_intent_request["shippingMethod"],
+            "shippingInformation": json.dumps(payment_intent_request["shippingInformation"]),
+            "products": json.dumps(payment_intent_request["products"]),
+            "prodigi_items": json.dumps(prodigi_items) # Should have the same order as products list``
+            },
         )
 
-        logger.warning("PaymentIntent successfully created: #{payment_intent.id}")
+        logger.warning("PaymentIntent successfully created: id {}, customer {}".format(payment_intent.id, payment_intent.customer))
         return JsonResponse(
             {
                 "intent" : payment_intent.id,
                 "secret" : payment_intent.client_secret,
-                "status" : payment_intent.status
+                "status" : payment_intent.status,
                 },
             safe=False
             )
@@ -262,6 +339,70 @@ def create_payment_intent(request):
 #     r = requests.get('http://httpbin.org/status/418')
 #     print(r.text)
 #     return HttpResponse('<pre>' + r.text + '</pre>')
+
+# This is your Stripe CLI webhook secret for testing your endpoint locally.
+endpoint_secret = 'whsec_YDgUbLJPhZ5ZWAaaSqWThyOdirHvcdTZ'
+
+@api_view(['POST'])
+def stripe_webhook(request):
+    payload = request.body
+    event = None
+
+    try:
+        event = stripe.Event.construct_from(
+        json.loads(payload), stripe.api_key
+        )
+    except ValueError as e:
+        # Invalid payload
+        return HttpResponse(status=400)
+
+    logger.warning("============EVENTS=================")
+    # Handle the event
+    if event.type == 'payment_intent.succeeded':
+        logger.warning("============PAYMENT INTENT SUCCEEDED=================")
+        payment_intent = event.data.object # contains a stripe.PaymentIntent
+        # Then define and call a method to handle the successful payment intent.
+        # handle_payment_intent_succeeded(payment_intent)
+        logger.warning("============PAYMENT INTENT=================")
+        logger.warning(payment_intent)
+        logger.warning("============PRODIGI ORDER=================")
+
+            # "shippingMethod": payment_intent_request["shippingMethod"],
+            # "shippingInformation": json.dumps(payment_intent_request["shippingInformation"]),
+            # "products": json.dumps(payment_intent_request["products"]),
+            # "prodigi_items": json.dumps(prodigi_items) # Should have the same order as products list``
+
+
+        order_response = create_trial_prodigi_order()
+
+        
+        logger.warning(order_response.content)
+
+        logger.warning("============PRODIGI ORDER DESERIALIZE=================")
+        d = serializers.serialize('json', ProdigiOrder.objects.all()) # serialize all the objects in Order model
+        for obj in serializers.deserialize('json', d):
+            logger.warning(obj.object) ## return the django model class object 
+
+    elif event.type == 'payment_method.attached':
+        logger.warning("============PAYMENT METHOD SUCCEEDED=================")
+        payment_method = event.data.object # contains a stripe.PaymentMethod
+        # Then define and call a method to handle the successful attachment of a PaymentMethod.
+        # handle_payment_method_attached(payment_method)
+    # ... handle other event types
+    else:
+        print('Unhandled event type {}'.format(event.type))
+
+    return HttpResponse(status=200)
+
+
+@api_view(['POST'])
+def prodigi_webhook(request):
+    logger.warning("============EVENTS PRODIGI=================")
+    prodigi_event  = json.loads(request.body)
+    logger.warning(prodigi_event)
+
+    return HttpResponse(status=200)
+
 
 def index(request):
     times = int(os.environ.get('TIMES',3))
@@ -325,6 +466,22 @@ EMOJI_STORE = {
   "🕶" : 2000,
   "👚" : 2500,
 }
+
+def create_price(product, unit_amount, currency):  
+    return stripe.Price.create(currency = currency, unit_amount = unit_amount, product = product)
+
+def update_price(product, unit_amount, currency, create_if_missing = False):    
+    prices = stripe.Price.list(product=product)
+    for price in prices:
+        if price["currency"] == currency:
+            new_price = stripe.Price.create(currency = currency, unit_amount = unit_amount, product = product)
+            stripe.Price.modify(price["id"], active=False, metadata={"substitute": new_price["id"]})
+            return new_price
+
+    if create_if_missing:
+        return create_price(product, unit_amount, currency)
+
+    return None
 
 def price_lookup(product):
 
