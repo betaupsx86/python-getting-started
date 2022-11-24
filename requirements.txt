@@ -4,3 +4,4 @@ django-heroku
 requests
 djangorestframework
 stripe>=2.48.0,<3.0
+cloudevents
